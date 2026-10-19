@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Reflexion + Verifier Dashboard</title>
+<script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+  :root { --bg:#0f1117; --panel:#171a23; --border:#2a2e3a; --text:#e6e8ee;
+          --muted:#8b92a5; --green:#3ecf8e; --red:#ef5b5b; --yellow:#e8b339; --blue:#5b8cff; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: -apple-system, Segoe UI, sans-serif; background:var(--bg); color:var(--text); }
+  .app { max-width: 1100px; margin: 0 auto; padding: 24px; }
+  h1 { font-size: 20px; margin-bottom: 4px; }
+  .sub { color: var(--muted); margin-bottom: 24px; font-size: 13px; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+  .row { display:flex; gap:12px; flex-wrap:wrap; align-items:center; }
+  label { font-size: 12px; color: var(--muted); display:block; margin-bottom:4px; }
+  input, select { background:#0d0f16; border:1px solid var(--border); color:var(--text); padding:7px 9px; border-radius:6px; font-size:13px; }
+  button { background: var(--blue); color:white; border:none; padding:8px 14px; border-radius:6px; cursor:pointer; font-size:13px; font-weight:600; }
+  button:disabled { opacity:0.5; cursor:not-allowed; }
+  button.secondary { background:#242835; }
+  table { width:100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--border); }
+  th { color: var(--muted); font-weight:600; }
+  .pill { display:inline-block; padding:2px 8px; border-radius:20px; font-size:11px; font-weight:600; }
+  .pill.solved { background:rgba(62,207,142,0.15); color:var(--green); }
+  .pill.failed { background:rgba(239,91,91,0.15); color:var(--red); }
+  .pill.trusted { background:rgba(62,207,142,0.15); color:var(--green); }
+  .pill.discarded { background:rgba(232,179,57,0.15); color:var(--yellow); }
+  .metric { display:inline-block; margin-right:24px; }
+  .metric .val { font-size:22px; font-weight:700; }
+  .metric .lab { font-size:11px; color:var(--muted); }
+  .tabs { display:flex; gap:4px; margin-bottom:16px; }
+  .tab { padding:7px 14px; border-radius:6px; cursor:pointer; font-size:13px; color:var(--muted); }
+  .tab.active { background: var(--panel); color:var(--text); border:1px solid var(--border); }
+  .flip { padding:6px 0; border-bottom:1px solid var(--border); font-size:13px; }
+  textarea { width:100%; background:#0d0f16; border:1px solid var(--border); color:var(--text); padding:9px; border-radius:6px; font:12px/1.5 ui-monospace, Menlo, Consolas, monospace; resize:vertical; }
+  pre { background:#0d0f16; border:1px solid var(--border); border-radius:6px; padding:10px; font-size:12px; overflow:auto; margin:6px 0; white-space:pre-wrap; }
+  .step { border-left:3px solid var(--border); padding:4px 0 4px 12px; margin:12px 0; }
+  .step.ok { border-color:var(--green); } .step.bad { border-color:var(--red); } .step.warn { border-color:var(--yellow); }
+  code { background:#0d0f16; padding:1px 5px; border-radius:4px; font-size:12px; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect } = React;
+const API = "http://localhost:8000/api";
+
+function Pill({ ok, trueLabel, falseLabel, trueClass, falseClass }) {
+  return <span className={`pill ${ok ? trueClass : falseClass}`}>{ok ? trueLabel : falseLabel}</span>;
+}
+
+function StartRunPanel({ onStarted }) {
+  const [form, setForm] = useState({
+    run_name: "run_" + Date.now(),
+    dataset_path: "./benchmarks/humaneval-py.jsonl",
+    strategy: "reflexion",
+    model: "gemini-3.5-flash-lite",
+    max_iters: 2,
+    pass_at_k: 1,
+    use_verifier: true,
+    verifier_model: "gemini-3.5-flash-lite",
+    limit: 3,
+  });
+  const [starting, setStarting] = useState(false);
+  const [err, setErr] = useState(null);
+
+  const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+
+  const start = async () => {
+    setStarting(true); setErr(null);
+    try {
+      const res = await fetch(`${API}/run`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(form),
+      });
+      if (!res.ok) throw new Error((await res.json()).detail || "Failed to start run");
+      onStarted(form.run_name);
+
+      // The POST above only kicks the run off in a background thread and
+      // returns immediately, so poll /status until it's actually finished
+      // before letting t=he button be clicked again.
+      const runName = form.run_name;
+      while (true) {
+        await new Promise(r => setTimeout(r, 2000));
+        const statusRes = await fetch(`${API}/status/${encodeURIComponent(runName)}`);
+        if (!statusRes.ok) break; // give up polling, don't block the button forever
+        const info = await statusRes.json();
+        if (info.status !== "running") {
+          if (info.status === "error") setErr(info.error || "Run failed");
+          break;
+        }
+      }
+    } catch (e) { setErr(e.message); }
+    setStarting(false);
+  };
+
+  return (
+    <div className="panel">
+      <div className="row" style={{ marginBottom: 12 }}>
+        <div><label>Run name</label>
+          <input value={form.run_name} onChange={e => set("run_name", e.target.value)} /></div>
+        <div><label>Dataset path</label>
+          <input style={{ width: 260 }} value={form.dataset_path} onChange={e => set("dataset_path", e.target.value)} /></div>
+        <div><label>Model</label>
+          <input value={form.model} onChange={e => set("model", e.target.value)} /></div>
+        <div><label>Limit (tasks)</label>
+          <input type="number" style={{ width: 70 }} value={form.limit} onChange={e => set("limit", parseInt(e.target.value) || null)} /></div>
+        <div><label>Max iters</label>
+          <input type="number" style={{ width: 70 }} value={form.max_iters} onChange={e => set("max_iters", parseInt(e.target.value))} /></div>
+        <div><label>Strategy</label>
+          <select value={form.strategy} onChange={e => set("strategy", e.target.value)}>
+            <option value="reflexion">reflexion</option>
+            <option value="simple">simple</option>
+          </select></div>
+        <div><label>Verifier</label>
+          <select value={form.use_verifier} onChange={e => set("use_verifier", e.target.value === "true")}>
+            <option value="true">on</option>
+            <option value="false">off</option>
+          </select></div>
+      </div>
+      <button onClick={start} disabled={starting}>{starting ? "Running…" : "Start Run"}</button>
+      {err && <div style={{ color: "var(--red)", marginTop: 8, fontSize: 13 }}>{err}</div>}
+    </div>
+  );
+}
+
+function RunSelector({ runs, value, onChange, label }) {
+  return (
+    <div>
+      <label>{label}</label>
+      <select value={value || ""} onChange={e => onChange(e.target.value)}>
+        <option value="">— select —</option>
+        {runs.map(r => <option key={r} value={r}>{r}</option>)}
+      </select>
+    </div>
+  );
+}
+
+function ResultsTable({ items }) {
+  return (
+    <table>
+      <thead><tr><th>Task</th><th>Solved</th><th>Trials</th><th>Reflections (trusted/total)</th></tr></thead>
+      <tbody>
+        {items.map((item, i) => {
+          const vlog = item.verifier_log || [];
+          const trusted = vlog.filter(v => v.is_trusted).length;
+          return (
+            <tr key={i}>
+              <td>{item.name}</td>
+              <td><Pill ok={item.is_solved} trueLabel="solved" falseLabel="failed" trueClass="solved" falseClass="failed" /></td>
+              <td>{(item.implementations || []).length}</td>
+              <td>{vlog.length > 0 ? `${trusted} / ${vlog.length}` : "—"}</td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  );
+}
+
+function VerifierLogPanel({ items }) {
+  const rows = [];
+  items.forEach(item => (item.verifier_log || []).forEach(v => rows.push({ task: item.name, ...v })));
+  if (rows.length === 0) return <div style={{ color: "var(--muted)", fontSize: 13 }}>No verifier activity in this run.</div>;
+  return (
+    <table>
+      <thead><tr><th>Task</th><th>Score</th><th>Verdict</th><th>Decision</th><th>Justification</th></tr></thead>
+      <tbody>
+        {rows.map((r, i) => (
+          <tr key={i}>
+            <td>{r.task}</td>
+            <td>{r.score?.toFixed(2)}</td>
+            <td>{r.verdict}</td>
+            <td><Pill ok={r.is_trusted} trueLabel="trusted" falseLabel="discarded" trueClass="trusted" falseClass="discarded" /></td>
+            <td style={{ maxWidth: 400, fontSize: 12, color: "var(--muted)" }}>{r.justification}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+function ComparePanel({ runs }) {
+  const [runA, setRunA] = useState("");
+  const [runB, setRunB] = useState("");
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState(null);
+
+  const compare = async () => {
+    setErr(null); setData(null);
+    try {
+      const res = await fetch(`${API}/compare?run_a=${encodeURIComponent(runA)}&run_b=${encodeURIComponent(runB)}`);
+      if (!res.ok) throw new Error((await res.json()).detail || "Compare failed");
+      setData(await res.json());
+    } catch (e) { setErr(e.message); }
+  };
+
+  return (
+    <div className="panel">
+      <div className="row" style={{ marginBottom: 12 }}>
+        <RunSelector runs={runs} value={runA} onChange={setRunA} label="Run A (e.g. with verifier)" />
+        <RunSelector runs={runs} value={runB} onChange={setRunB} label="Run B (e.g. baseline)" />
+        <button onClick={compare} disabled={!runA || !runB} style={{ marginTop: 18 }}>Compare</button>
+      </div>
+      {err && <div style={{ color: "var(--red)", fontSize: 13 }}>{err}</div>}
+      {data && (
+        <div>
+          <div className="row" style={{ marginBottom: 16 }}>
+            {[["A: " + data.run_a.name, data.run_a.summary], ["B: " + data.run_b.name, data.run_b.summary]].map(([label, s]) => (
+              <div className="panel" style={{ flex: 1, minWidth: 260 }} key={label}>
+                <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 8 }}>{label}</div>
+                <div className="metric"><div className="val">{(s.pass_at_1 * 100).toFixed(1)}%</div><div className="lab">pass@1</div></div>
+                <div className="metric"><div className="val">{s.n_solved}/{s.n_tasks}</div><div className="lab">solved</div></div>
+                {s.avg_trials_to_solve != null &&
+                  <div className="metric"><div className="val">{s.avg_trials_to_solve.toFixed(2)}</div><div className="lab">avg trials</div></div>}
+                {s.reflection_trust_rate != null &&
+                  <div className="metric"><div className="val">{(s.reflection_trust_rate * 100).toFixed(0)}%</div><div className="lab">reflections trusted</div></div>}
+              </div>
+            ))}
+          </div>
+          <div style={{ fontSize: 13, marginBottom: 8, color: "var(--muted)" }}>
+            {data.common_tasks} tasks in common · {data.flips.length} outcome flips
+          </div>
+          {data.flips.map((f, i) => (
+            <div className="flip" key={i}>
+              <code>{f.task}</code>: A {f.run_a_solved ? "✅" : "❌"} → B {f.run_b_solved ? "✅" : "❌"}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function LiveCheckPanel() {
+  const [code, setCode] = useState("def is_palindrome(s: str) -> bool:\n    \"\"\"Return True if s reads the same forwards and backwards, ignoring case.\"\"\"\n    return s == s[::-1]\n");
+  const [tests, setTests] = useState("");
+  const [desc, setDesc] = useState("");
+  const [useVerifier, setUseVerifier] = useState(true);
+  const [maxIters, setMaxIters] = useState(3);
+  const [model, setModel] = useState("gemini-3.1-flash-lite");
+  const [events, setEvents] = useState([]);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+
+  const run = async () => {
+    setBusy(true); setErr(null); setEvents([]);
+    try {
+      const res = await fetch(`${API}/check`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code, tests, description: desc, model, verifier_model: model,
+                               max_iters: Number(maxIters), use_verifier: useVerifier }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = "";
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        const parts = buf.split("\n\n"); buf = parts.pop();
+        for (const p of parts) if (p.startsWith("data: ")) {
+          const ev = JSON.parse(p.slice(6));
+          if (ev.type === "error") setErr(ev.message); else setEvents(e => [...e, ev]);
+        }
+      }
+    } catch (e) { setErr(String(e)); }
+    setBusy(false);
+  };
+
+  const done = events.find(e => e.type === "done");
+  return (
+    <div>
+      <div className="panel">
+        <label>Paste your code (function + docstring works best)</label>
+        <textarea rows={10} value={code} onChange={e => setCode(e.target.value)} spellCheck={false} />
+        <div style={{ height: 10 }} />
+        <label>Tests (optional — asserts, one per statement). Leave blank to let the model generate them.</label>
+        <textarea rows={4} value={tests} onChange={e => setTests(e.target.value)} spellCheck={false}
+          placeholder={"assert is_palindrome('Aba') == True"} />
+        <div style={{ height: 10 }} />
+        <label>What should it do? (optional, helps test generation)</label>
+        <input style={{ width: "100%" }} value={desc} onChange={e => setDesc(e.target.value)} />
+        <div className="row" style={{ marginTop: 12 }}>
+          <div><label>Model</label><input value={model} onChange={e => setModel(e.target.value)} /></div>
+          <div><label>Max fix iterations</label><input type="number" min="1" max="6" value={maxIters} style={{ width: 70 }} onChange={e => setMaxIters(e.target.value)} /></div>
+          <div><label>Verifier</label>
+            <select value={String(useVerifier)} onChange={e => setUseVerifier(e.target.value === "true")}>
+              <option value="true">On</option><option value="false">Off (plain Reflexion)</option>
+            </select></div>
+          <div style={{ alignSelf: "flex-end" }}><button onClick={run} disabled={busy || !code.trim()}>{busy ? "Checking…" : "Check code"}</button></div>
+        </div>
+      </div>
+
+      {err && <div className="panel" style={{ color: "var(--red)", fontSize: 13 }}>{err}</div>}
+
+      {events.map((ev, i) => {
+        if (ev.type === "tests") return (
+          <div className="step" key={i}><b>Tests ({ev.source === "user" ? "yours" : "AI-generated — review them"})</b>
+            <pre>{ev.tests.join("\n")}</pre></div>);
+        if (ev.type === "run") return (
+          <div className={`step ${ev.passed ? "ok" : "bad"}`} key={i}>
+            <b>{ev.iter === 0 ? "Your code" : `Fix attempt ${ev.iter}`}</b> — {ev.passed ? "all tests pass ✅" : "tests failing ❌"}
+            {ev.iter > 0 && <pre>{ev.code}</pre>}
+            {!ev.passed && <pre>{ev.feedback}</pre>}
+          </div>);
+        if (ev.type === "verdict") return (
+          <div className={`step ${ev.is_trusted ? "ok" : "warn"}`} key={i}>
+            <b>Reflection{ev.attempt === 2 ? " (regenerated)" : ""}</b>{" "}
+            <Pill ok={ev.is_trusted} trueLabel={`trusted · ${ev.score.toFixed(2)}`} falseLabel={`rejected · ${ev.score.toFixed(2)}`} trueClass="trusted" falseClass="discarded" />
+            <div style={{ fontSize: 13, margin: "6px 0" }}>{ev.reflection}</div>
+            <div style={{ fontSize: 12, color: "var(--muted)" }}>Verifier: {ev.verdict} — {ev.justification}</div>
+          </div>);
+        if (ev.type === "reflection") return (
+          <div className="step" key={i}><b>Reflection (unverified)</b><div style={{ fontSize: 13 }}>{ev.reflection}</div></div>);
+        return null;
+      })}
+
+      {done && (
+        <div className="panel">
+          <b>{done.passed ? "✅ Final code passes all tests" : "❌ Still failing after max iterations"}</b>
+          <span style={{ color: "var(--muted)", fontSize: 12 }}> · {done.iterations} fix attempt(s)</span>
+          <pre>{done.final_code}</pre>
+          <button className="secondary" onClick={() => navigator.clipboard.writeText(done.final_code)}>Copy code</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function App() {
+  const [runs, setRuns] = useState([]);
+  const [tab, setTab] = useState("live");
+  const [selectedRun, setSelectedRun] = useState("");
+  const [results, setResults] = useState(null);
+  const [subTab, setSubTab] = useState("results");
+
+  const refreshRuns = async () => {
+    try {
+      const res = await fetch(`${API}/runs`);
+      setRuns(await res.json());
+    } catch (e) { /* backend not up yet */ }
+  };
+
+  useEffect(() => { refreshRuns(); const id = setInterval(refreshRuns, 4000); return () => clearInterval(id); }, []);
+
+  useEffect(() => {
+    if (!selectedRun) { setResults(null); return; }
+    fetch(`${API}/results/${encodeURIComponent(selectedRun)}`)
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then(setResults)
+      .catch(() => setResults(null));
+  }, [selectedRun, runs]);
+
+  return (
+    <div className="app">
+      <h1>Reflexion + Verifier Dashboard</h1>
+      <div className="sub">Paste code → run → reflect → verify → fix. Batch benchmark runs are under Runs / Compare.</div>
+
+      <div className="tabs">
+        <div className={`tab ${tab === "live" ? "active" : ""}`} onClick={() => setTab("live")}>Live Check</div>
+        <div className={`tab ${tab === "runs" ? "active" : ""}`} onClick={() => setTab("runs")}>Runs</div>
+        <div className={`tab ${tab === "compare" ? "active" : ""}`} onClick={() => setTab("compare")}>Compare</div>
+      </div>
+
+      {tab === "live" && <LiveCheckPanel />}
+
+      {tab === "runs" && <StartRunPanel onStarted={(name) => { setSelectedRun(name); setTab("runs"); refreshRuns(); }} />}
+
+      {tab === "runs" && (
+        <div className="panel">
+          <div className="row" style={{ marginBottom: 12 }}>
+            <RunSelector runs={runs} value={selectedRun} onChange={setSelectedRun} label="Select a run" />
+          </div>
+          {selectedRun && (
+            <div>
+              <div className="tabs">
+                <div className={`tab ${subTab === "results" ? "active" : ""}`} onClick={() => setSubTab("results")}>Task Results</div>
+                <div className={`tab ${subTab === "verifier" ? "active" : ""}`} onClick={() => setSubTab("verifier")}>Verifier Log</div>
+              </div>
+              {!results && <div style={{ color: "var(--muted)", fontSize: 13 }}>No results yet — run may still be in progress.</div>}
+              {results && subTab === "results" && <ResultsTable items={results} />}
+              {results && subTab === "verifier" && <VerifierLogPanel items={results} />}
+            </div>
+          )}
+        </div>
+      )}
+
+      {tab === "compare" && <ComparePanel runs={runs} />}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
